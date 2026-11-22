@@ -1,108 +1,117 @@
-# PDF-Security-Kit-Nutter-tools-
-# PDF Static Analysis Tool 
+# PDF Security Kit
 
-A Python-based **static** scanner for PDFs that performs quick forensic triage: metadata checks, entropy estimation, suspicious keyword/obfuscation heuristics, IOC extraction, optional PDF structure scraping, and JSON reporting.
+A Python static scanner for PDFs that performs forensic triage: it walks
+the actual PDF object graph (via `pikepdf`) — not just the raw file bytes —
+to find auto-executing JavaScript, launch actions, suspicious keywords,
+obfuscation, and network/email indicators, then produces a risk score and
+an optional JSON report.
 
-> Note: This tool is for **defensive analysis** and triage. Always follow legal/organizational rules.
+> Static heuristic tool for defensive triage only. Findings can include
+> false positives/negatives. For confirmed analysis, use alongside
+> sandboxing/dynamic analysis and check hashes against trusted threat
+> intel. Always follow your legal/organizational rules.
 
----
+## Why structural, not just byte-matching
+
+A naive scanner that greps the raw file for keywords like `javascript` or
+`eval` misses anything PDF producers routinely do to obfuscate or simply
+compress content: objects packed into compressed object streams
+(`/ObjStm`), filtered stream data, and on-disk `#XX` hex-escaped names
+(e.g. `/J#61vaScript` → `/JavaScript`). It also false-positives on
+ordinary compressed binary data that happens to contain a keyword
+substring.
+
+This tool parses the object graph with `pikepdf`, which transparently
+resolves compressed object streams and decodes filtered data, then:
+
+- Matches dangerous constructs by **exact PDF name** (`/OpenAction`,
+  `/AA`, `/JS`, `/JavaScript`, `/Launch`, `/SubmitForm`, `/EmbeddedFile`,
+  `/RichMedia`, `/Names/JavaScript`) rather than substring search.
+- Runs keyword/IOC/obfuscation checks only against **decoded** stream and
+  string content.
+- Falls back to a raw-byte scan — clearly labeled and capped at a lower
+  confidence — only when the file can't be parsed (encrypted without the
+  right password, or corrupt).
 
 ## What it detects
 
-- **File metadata & validation**
-  - Confirms PDF header (`%PDF`)
-  - Uses `python-magic` (if installed) for MIME type
-  - Computes **MD5 / SHA-1 / SHA-256**
-- **Entropy scoring** (Shannon entropy) to highlight likely compression/encryption
-- **Embedded content heuristics**
-  - Extracts raw printable strings and matches them against suspicious keyword weights (e.g., `openaction`, `launch`, `javascript`, `eval`, `powershell`, etc.)
-  - Finds common **obfuscation indicators** (e.g., `\\x..` hex escapes, `\\u....` sequences, `eval(`, `fromCharCode(`, long repeated NOP patterns, large base64-like blobs)
-- **IOC extraction**
-  - URL, IP, domain, email patterns
-  - Base64 “blob” detection and a small decode preview
-- **PDF structure (optional, via `pdfminer.six`)**
-  - Page count
-  - Basic document metadata
-  - Counts streams and shows snippets that look like embedded JS/Eval
-- **Risk scoring & verdict**
-  - Weighted score based on keyword hits, obfuscation signals, IOCs, entropy, and embedded JS snippet count
-- **JSON report**
-  - Produces a structured report suitable for triage pipelines.
-
----
+- File metadata & validation: `%PDF` header check, MIME type (via
+  `python-magic` if installed), MD5/SHA-1/SHA-256 hashes.
+- Structural findings: `/OpenAction` auto-run JavaScript or Launch
+  actions, document/page/annotation-level `/AA` actions, the
+  `/Names/JavaScript` auto-run name tree, `/Launch`, `/SubmitForm`,
+  `/EmbeddedFile`, `/RichMedia`, `/AcroForm`, and streams with high
+  entropy but no recognized compression filter (possible packed payload).
+- Suspicious keywords (`eval`, `unescape`, `powershell`, `shellcode`,
+  `fromCharCode`, …), scored against decoded content.
+- IOC extraction: URLs, IPs, domains, emails, and a base64-blob decode
+  preview.
+- Obfuscation heuristics: hex/unicode/percent-encoded chains, `eval(...)`
+  / `unescape(...)` / `fromCharCode(...)` calls, NOP sleds.
+- Weighted risk score and band (CLEAN / LOW / MEDIUM / HIGH / CRITICAL),
+  with certain structural findings (e.g. auto-run JS on open) setting a
+  minimum band regardless of the numeric score.
+- JSON report export for triage pipelines.
 
 ## Requirements
 
-Python 3.
+Python 3.9+.
 
-Install dependencies:
-
-```bash
-pip install rich pdfminer.six python-magic
+```
+pip install -r requirements.txt
 ```
 
-Optional note:
-- If `python-magic` cannot be installed (or system `libmagic` is missing), MIME detection may be marked as unavailable, but the tool still runs.
-
----
+If `python-magic` can't be installed (missing system `libmagic`), MIME
+detection is marked unavailable but the tool still runs fully.
 
 ## Usage
 
-```bash
+```
 python3 pdf_sec_kit.py <file.pdf>
 ```
 
-### JSON export
+JSON export:
 
-```bash
+```
 python3 pdf_sec_kit.py <file.pdf> --json
-```
-
-Write JSON to a specific file (implies `--json`):
-
-```bash
 python3 pdf_sec_kit.py <file.pdf> --output report.json
+python3 pdf_sec_kit.py <file.pdf> --password <pw>   # for encrypted PDFs
 ```
 
-If `--output` is not provided and `--json` is used, the default output file name is:
-
-- `<pdf_stem>_analysis.json`
-
----
+If `--output` is omitted and `--json` is used, the default file name is
+`<pdf_stem>_analysis.json`.
 
 ## Output
 
-The terminal output includes:
+Terminal sections: FILE INFORMATION, PDF STRUCTURE, STRUCTURAL FINDINGS,
+SUSPICIOUS KEYWORDS, EXTRACTED IOCs, OBFUSCATION HEURISTICS, RISK
+ASSESSMENT.
 
-- **FILE INFORMATION**
-- **PDF STRUCTURE** (when `pdfminer.six` is installed)
-- **SUSPICIOUS KEYWORDS**
-- **EXTRACTED IOCs**
-- **OBFUSCATION HEURISTICS**
-- **RISK ASSESSMENT** (risk band + recommendations)
+The JSON report additionally records `analysis_mode` (`structural` or
+`raw_fallback`, with a note explaining why when it falls back),
+per-finding weights and floor bands, decoded-JS snippet counts, and any
+high-entropy unfiltered streams.
 
-When JSON is enabled, the report includes:
+## Tests
 
-- tool version
-- timestamp
-- hashes
-- entropy
-- PDF structure highlights
-- suspicious keyword hits
-- IOCs
-- obfuscation indicators
-- overall risk score + risk level
+`tests/make_tests.py` builds a small set of synthetic PDFs (harmless
+payloads only) used to validate detection: a benign file, three variants
+of the same auto-run-JS payload packaged differently (plain, in a
+compressed object stream, and as a compressed stream inside a compressed
+object stream — all three must score identically), a large benign report
+(checks for false positives), a legitimate hyperlink PDF, and a PDF whose
+`/JavaScript` name is written with an on-disk hex escape (checks the
+evasion is still caught).
 
----
-
-## Example
-
-```bash
-python3 pdf_sec_kit.py sample.pdf --output sample_report.json
 ```
-
----
+pip install -r requirements.txt
+cd tests && python3 make_tests.py
+python3 ../pdf_sec_kit.py t1_plain.pdf --output t1.json
+```
 
 ## Disclaimer
 
-This is a static heuristic tool. Findings can include false positives/negatives. For confirmed analysis, use it alongside sandboxing/dynamic analysis, and validate hashes/indicators with trusted threat intel.
+This is a static heuristic tool. Findings can include false
+positives/negatives. For confirmed analysis, use it alongside
+sandboxing/dynamic analysis, and validate hashes/indicators with trusted
+threat intel.
